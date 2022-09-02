@@ -23,7 +23,7 @@
   <node name="lidar_undistortion_2d_node" pkg="lidar_undistortion_2d" type="lidar_undistortion_2d_node" if="$(arg enable_undistortion)" output="screen">
     <param name="scan_sub_topic" value="$(arg scan_orign_topic)"/>
     <param name="scan_pub_topic" value="$(arg scan_topic)"/>
-    <param name="enable_pub_pointcloud" value="false"/>
+    <param name="enable_pub_pointcloud" value="true"/>
     <param name="lidar_frame" value="$(arg laser_frame)"/>
     <param name="odom_frame" value="$(arg odom_frame)"/>
     <param name="lidar_scan_time_gain" value="1000.0"/> <!--remind: in most cases, the value of lidar_scan_time_gain is 1.0, but in this test case, the scan_time in '/scan' topic is wrong-->

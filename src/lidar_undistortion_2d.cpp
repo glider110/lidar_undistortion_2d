@@ -14,6 +14,11 @@
 #include <fstream>
 #include <iostream>
 
+#include<Eigen/Core>
+#include<Eigen/Dense>
+
+using namespace std;
+using namespace Eigen;
 class LidarMotionCalibrator
 {
 private:
@@ -44,7 +49,7 @@ public:
         ros::NodeHandle nh_param("~");
         nh_param.param<std::string>("scan_sub_topic", scan_sub_topic_, "/scan");
         nh_param.param<std::string>("scan_pub_topic", scan_pub_topic_, "/lidar_undistortion/scan");
-        nh_param.param<bool>("enable_pub_pointcloud", enable_pub_pointcloud_, false);
+        nh_param.param<bool>("enable_pub_pointcloud", enable_pub_pointcloud_, true);
         nh_param.param<std::string>("point_cloud_pub_topic", pointcloud_pub_topic_, "/lidar_undistortion/pointcloud");
         nh_param.param<std::string>("lidar_frame", lidar_frame_, "laser_link");
         nh_param.param<std::string>("odom_frame", odom_frame_, "oodm");
@@ -71,6 +76,18 @@ public:
         // 得到最终点的时间
         int beamNum = scan_msg->ranges.size();
         endTime = startTime + ros::Duration(scan_msg->time_increment * lidar_scan_time_gain_ * beamNum);
+
+        static ros::Time last_time;
+        std::cout<< "startTime:" << startTime<< std::endl;
+        std::cout<< "endTime:" << endTime<< std::endl;
+        std::cout<< "diff:" << endTime - startTime<< std::endl;
+        std::cout<< "diff1:" << scan_msg->time_increment * lidar_scan_time_gain_ * beamNum<< std::endl;
+        std::cout<< "diff1:" << ros::Duration(scan_msg->time_increment * lidar_scan_time_gain_ * beamNum)<< std::endl;
+        std::cout<< "beamNum:" << beamNum<< std::endl;
+        std::cout<< "scan.config.time_increment:" << scan_msg->time_increment<< std::endl;
+        std::cout<< "last_time:" << last_time<< std::endl;
+
+        last_time = startTime;
 
         // 将数据复制出来
         std::vector<double> angles;
@@ -100,8 +117,7 @@ public:
             ROS_WARN("Not End Pose, Can not Calib");
             return ;
         }
-
-        // ROS_INFO("calibration start");
+        ROS_INFO("calibration start");
         // 进行矫正
         Lidar_Calibration(ranges,
                           angles,
@@ -109,7 +125,7 @@ public:
                           endTime,
                           tf_);
 
-        // ROS_INFO("calibration end");
+        ROS_INFO("calibration end");
 
         if(enable_pub_pointcloud_) publishPointCloud2(startTime, angles, ranges, intensities);  
         publishScan(scan_msg, ranges, angles, intensities, start_pose, end_pose);
@@ -214,7 +230,6 @@ public:
         //TODO
         // 每个位姿进行线性插值时的步长
         const double beam_step = 1.0 / (beam_number - 1);
-
         // 得到偏航角
         tf::Quaternion base_quaternion = frame_base_pose.getRotation();
         double base_angle = tf::getYaw(base_quaternion);
@@ -223,9 +238,20 @@ public:
         tf::Quaternion end_quaternion = frame_end_pose.getRotation();
         double end_angle = tf::getYaw(end_quaternion);
 
+        Eigen::AngleAxisd start_angle_( tf::getYaw(start_quaternion), Eigen::Vector3d(0, 0, 1));
+        Eigen::AngleAxisd end_angle_( tf::getYaw(end_quaternion), Eigen::Vector3d(0, 0, 1));
+        Eigen::AngleAxisd base_angle_( tf::getYaw(base_quaternion), Eigen::Vector3d(0, 0, 1));
+        Eigen::Quaterniond start_angle_q_(start_angle_);
+        Eigen::Quaterniond end_angle_q_(end_angle_);
+        Eigen::Quaterniond base_angle_q_(base_angle_);
+
+
+
         // 得到位移
         tf::Vector3 base_point = frame_base_pose.getOrigin();
         base_point.setZ(0);
+        Eigen::Vector3d base_pos_;
+        base_pos_<< base_point.getX(),base_point.getY(),base_point.getZ();
         tf::Vector3 start_point = frame_start_pose.getOrigin();
         start_point.setZ(0);
         tf::Vector3 end_point = frame_end_pose.getOrigin();
@@ -242,19 +268,61 @@ public:
             tf::Vector3 cur_point = start_point.lerp(end_point, index * beam_step);
             frame_cur_pose.setOrigin(cur_point);
             frame_cur_pose.setRotation(cur_quaternion);
+            //装换为eigen
+            Eigen::AngleAxisd cur_angle_( tf::getYaw(cur_quaternion), Eigen::Vector3d(0, 0, 1));
+            Eigen::Quaterniond cur_angle_q_(cur_angle_);
+            Eigen::Vector3d cur_pos_;
+            cur_pos_<< cur_point.getX(),cur_point.getY(),cur_point.getZ();
+
 
             // 如果激光雷达检测到的距离不为0
             if(!tfFuzzyZero(lidar_range) && !std::isinf(lidar_range)) {
 
                 tf::Vector3 lidar_point;
+                Vector3d lidar_point_;
                 double lidar_x = lidar_range * cos(lidar_angle);
                 double lidar_y = lidar_range * sin(lidar_angle);
                 lidar_point.setValue(lidar_x, lidar_y, 0);
-                
-                tf::Vector3 corrected_lidar_point = tf::Pose(base_quaternion, base_point).inverse() * frame_cur_pose * lidar_point;
+                lidar_point_ << lidar_x, lidar_y, 0;
 
-                ranges[startIndex + index] = hypot(corrected_lidar_point.getX(), corrected_lidar_point.getY());
-                angles[startIndex + index] = atan2(corrected_lidar_point.getY(), corrected_lidar_point.getX());
+                //glider:第一种装换(借助ros-tf)
+                tf::Vector3 corrected_lidar_point = tf::Pose(base_quaternion, base_point).inverse() * frame_cur_pose * lidar_point;
+                // tf::Pose trans = tf::Pose(base_quaternion, base_point).inverse() * frame_cur_pose ;
+                // tf::Vector3 corrected_lidar_point =trans* lidar_point;
+
+                //glider:第二种装换(借助Affine映射)
+                Affine3d trans_1 = Eigen::Affine3d::Identity();
+                trans_1.rotate(base_angle_q_);
+                trans_1.translate(base_pos_);
+                Affine3d trans_2 = Eigen::Affine3d::Identity();
+                trans_2.rotate(cur_angle_q_);
+                trans_2.translate(cur_pos_);
+                Affine3d trans_3 =trans_1.inverse()*trans_2;
+                Vector3d corrected_lidar_point2 = trans_3 * lidar_point_;
+
+                //glider:第三种装换(借助Isometry3d映射)
+                base_angle_q_.normalize();
+                cur_angle_q_.normalize();
+                Isometry3d T1w(base_angle_q_);
+                Isometry3d T2w(cur_angle_q_);
+                T1w.pretranslate(base_pos_); // 增加平移量
+                T2w.pretranslate(cur_pos_);
+                Isometry3d T3 = T1w.inverse()*T2w ;
+                Vector3d corrected_lidar_point3 =T3 * lidar_point_;
+
+                std::cout << "origin point: " << lidar_x << " " <<lidar_y <<std::endl;
+                // std::cout << "beamNumber: " <<trans.getOrigin().getX()<< " "<<trans.getOrigin().getY()<< " "<<trans.getOrigin().getZ()<<std::endl;
+                std::cout << "transform point1: " << corrected_lidar_point.getX() << " " <<corrected_lidar_point.getY() <<std::endl;
+                std::cout << "transform point2: " << corrected_lidar_point2.x() << " " <<corrected_lidar_point2.y() <<std::endl;
+                std::cout << "transform point3: " << corrected_lidar_point3.x() << " " <<corrected_lidar_point3.y() <<std::endl;
+
+                // std::cout << "beamNumber: " <<trans.getRotation().getAngle()<<std::endl;
+
+                // ranges[startIndex + index] = hypot(corrected_lidar_point.getX(), corrected_lidar_point.getY());
+                // angles[startIndex + index] = atan2(corrected_lidar_point.getY(), corrected_lidar_point.getX());
+
+                ranges[startIndex + index] = hypot(corrected_lidar_point.x(), corrected_lidar_point.y());
+                angles[startIndex + index] = atan2(corrected_lidar_point.y(), corrected_lidar_point.x());
             }
             else { // 如果为0
 
@@ -358,6 +426,8 @@ public:
                 //对当前的起点和终点进行插值
                 //interpolation_time_duration中间有多少个点.
                 int interp_count = i - start_index + 1;
+                // std::cout << "beam_step: " <<interp_count<<std::endl;
+                // std::cout << "beamNumber: " <<beamNumber<<std::endl;
 
                 Lidar_MotionCalibration(frame_base_pose, // 开始时刻位姿
                                         frame_start_pose, // 当前线性插值开始时的位姿
